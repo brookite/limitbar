@@ -5,7 +5,7 @@ have used. It finds the agents installed on your machine, reads the credentials
 they already store, asks each vendor's own usage endpoint, and draws one progress
 bar per limit window — every agent in one window, split into sections.
 
-![LimitBar](./app-icon.png)
+<img src="./app-icon.png" width="64" height="64" alt="LimitBar">
 
 ## Read this before you use it
 
@@ -21,14 +21,14 @@ screen, and never written back to disk. You do not have to take my word for any 
 this; the [audit table below](#there-are-no-binary-downloads-on-purpose) points at
 the exact files, and they are short.
 
-**But please understand what you are taking on.** Usage endpoint is not a
-documented public API.
-Using them from a third-party tool may be against Anthropic's or OpenAI's terms of
-service, now or after a future change to them, and they are free to rate-limit,
-suspend or ban accounts over it. LimitBar polls no faster than once every 15
-seconds, stops entirely while its window is hidden, backs off when asked to, and
-offers a manual mode that sends nothing at all until you press the button — but
-restraint is not permission, and none of it is a guarantee.
+**But please understand what you are taking on.** These usage endpoints are not
+documented public APIs. Using them from a third-party tool may be against
+Anthropic's or OpenAI's terms of service, now or after a future change to them,
+and they are free to rate-limit, suspend or ban accounts over it. LimitBar polls
+no faster than once every 15 seconds, stops entirely while its window is hidden,
+backs off when asked to, and offers a manual mode that sends nothing at all until
+you press the button — but restraint is not permission, and none of it is a
+guarantee.
 
 **This software comes with no warranty of any kind** (see [LICENSE](LICENSE)). The
 author accepts no responsibility for bugs, for anything that follows from them, or
