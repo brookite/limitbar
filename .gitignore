@@ -1,0 +1,18 @@
+# Rust build output. This is a cargo workspace, so there is one target/ at the
+# repository root — not one inside src-tauri/.
+/target
+
+# Node
+node_modules
+
+# Vite output, compiled into the binary at build time
+dist
+
+# Tauri regenerates these from capabilities/ on every build
+src-tauri/gen/schemas
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
