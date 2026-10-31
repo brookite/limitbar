@@ -159,7 +159,7 @@ impl LimitProvider for OpenCodeProvider {
             let mut reading =
                 super::codex::fetch_usage(http, vendor_base, token, openai["accountId"].as_str())
                     .await?;
-            reading.note = Some("Codex · общий лимит".into());
+            reading.note = Some("Codex · shared limit".into());
             return Ok(reading);
         }
         if let Some(anthropic) = entries.get("anthropic").filter(|v| v["type"] == "oauth") {
@@ -170,7 +170,7 @@ impl LimitProvider for OpenCodeProvider {
                 base
             };
             let mut reading = super::claude::fetch_usage(http, vendor_base, token, None).await?;
-            reading.note = Some("Claude · общий лимит".into());
+            reading.note = Some("Claude · shared limit".into());
             return Ok(reading);
         }
         if entries.as_object().is_some_and(|m| !m.is_empty()) {

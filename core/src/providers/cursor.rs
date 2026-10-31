@@ -314,7 +314,7 @@ impl LimitProvider for CursorProvider {
         }
         if grok.is_err() {
             reading.note = Some(format!(
-                "{} · Grok: недоступно",
+                "{} · Grok: unavailable",
                 reading.note.as_deref().unwrap_or("Cursor")
             ));
         }

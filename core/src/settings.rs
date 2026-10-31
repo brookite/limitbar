@@ -1,4 +1,4 @@
-//! Persisted widget preferences: refresh period, pin state and collapsed agents.
+//! Persisted widget preferences: refresh period, pin state and agent layout.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -15,6 +15,8 @@ pub struct Settings {
     pub always_on_top: bool,
     #[serde(default)]
     pub collapsed_agents: BTreeSet<String>,
+    #[serde(default)]
+    pub agent_order: Vec<String>,
 }
 
 impl Default for Settings {
@@ -23,6 +25,7 @@ impl Default for Settings {
             interval_secs: DEFAULT_INTERVAL_SECS,
             always_on_top: false,
             collapsed_agents: BTreeSet::new(),
+            agent_order: Vec::new(),
         }
     }
 }
@@ -32,6 +35,9 @@ impl Settings {
     /// the widget poll faster than the menu allows.
     pub fn sanitized(mut self) -> Self {
         self.interval_secs = sanitize_interval(self.interval_secs);
+        let mut seen = BTreeSet::new();
+        self.agent_order
+            .retain(|id| !id.is_empty() && seen.insert(id.clone()));
         self
     }
 }
@@ -137,6 +143,7 @@ mod tests {
         assert_eq!(loaded.interval_secs, 90);
         assert!(loaded.always_on_top);
         assert!(loaded.collapsed_agents.is_empty());
+        assert!(loaded.agent_order.is_empty());
     }
 
     #[test]
@@ -148,9 +155,20 @@ mod tests {
                 interval_secs,
                 always_on_top: true,
                 collapsed_agents: BTreeSet::from(["codex".into(), "cursor".into()]),
+                agent_order: vec!["cursor".into(), "codex".into()],
             };
             save_to(&path, &settings).unwrap();
             assert_eq!(load_from(&path), settings);
         }
+    }
+
+    #[test]
+    fn agent_order_keeps_first_occurrences_and_removes_empty_ids() {
+        let settings = Settings {
+            agent_order: vec!["cursor".into(), "".into(), "codex".into(), "cursor".into()],
+            ..Settings::default()
+        }
+        .sanitized();
+        assert_eq!(settings.agent_order, ["cursor", "codex"]);
     }
 }

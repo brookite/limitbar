@@ -9,35 +9,28 @@
 import type { AgentStatus } from "../model";
 
 export const ui = {
-  pinOn: "Открепить окно",
-  pinOff: "Закрепить поверх других окон",
-  close: "Закрыть",
-  refreshNow: "Обновить сейчас",
-  intervalLabel: "Период обновления",
-  manual: "Вручную",
-  seconds: (n: number) => `${n} с`,
+  pinOn: "Unpin window",
+  pinOff: "Keep window on top",
+  close: "Close",
+  refreshNow: "Refresh now",
+  intervalLabel: "Refresh interval",
+  manual: "Manual",
+  seconds: (n: number) => `${n} s`,
   /** Shown only in manual mode, where the numbers age until you ask for more. */
-  lastUpdated: (text: string) => `Обновлено ${text} назад`,
-  lastUpdatedJustNow: "Обновлено только что",
-  neverUpdated: "Ещё не обновлялось",
-  noAgents: "Ни одного агента не найдено",
-  updatedJustNow: "обновлено только что",
-  updatedAgo: (text: string) => `обновлено ${text} назад`,
-  resetsIn: (text: string) => `сброс через ${text}`,
-  resetPassed: "сброс вот-вот",
-  additionalInfo: "Дополнительно",
-  collapseAgent: (name: string) => `Свернуть секцию ${name}`,
-  expandAgent: (name: string) => `Развернуть секцию ${name}`,
-  expiresIn: (text: string) => `истекает через ${text}`,
+  lastUpdated: (text: string) => `Updated ${text} ago`,
+  lastUpdatedJustNow: "Updated just now",
+  neverUpdated: "Not updated yet",
+  noAgents: "No agents found",
+  updatedJustNow: "updated just now",
+  updatedAgo: (text: string) => `updated ${text} ago`,
+  resetsIn: (text: string) => `resets in ${text}`,
+  resetPassed: "resetting soon",
+  additionalInfo: "More details",
+  collapseAgent: (name: string) => `Collapse ${name} section`,
+  expandAgent: (name: string) => `Expand ${name} section`,
+  reorderAgent: (name: string) => `Reorder ${name}: drag or use Up/Down arrow keys`,
+  expiresIn: (text: string) => `expires in ${text}`,
 };
-
-export function detailLabel(label: string): string {
-  return ({ "Credits": "Кредиты", "Limit resets": "Сбросы лимита" } as Record<string, string>)[label] ?? label;
-}
-
-export function detailValue(value: string): string {
-  return ({ "Unavailable": "Нет данных", "Unlimited": "Без ограничений" } as Record<string, string>)[value] ?? value;
-}
 
 /** A sentence explaining a section's state, plus what to do about it. */
 export function statusMessage(status: AgentStatus, displayName: string): string {
@@ -47,63 +40,63 @@ export function statusMessage(status: AgentStatus, displayName: string): string 
     case "stale":
       return statusMessage(status.because, displayName);
     case "notInstalled":
-      return `${displayName} не установлен`;
+      return `${displayName} is not installed`;
     case "notSignedIn":
-      return "Вход не выполнен — запустите агента и войдите";
+      return "Not signed in — open the agent and sign in";
     case "sessionExpired":
-      return "Токен истёк — запустите агента для обновления сессии";
+      return "Session expired — open the agent to refresh it";
     case "unauthorized":
-      return "Учётные данные отклонены — выполните вход в агенте заново";
+      return "Credentials rejected — sign in to the agent again";
     case "rateLimited":
-      return `Слишком часто — API ограничил запросы, повтор ${atTime(status.retryAt)}`;
+      return `Rate limited — retry ${atTime(status.retryAt)}`;
     case "serviceUnavailable":
-      return `Сервис недоступен (HTTP ${status.httpStatus}), пробую ещё раз`;
+      return `Service unavailable (HTTP ${status.httpStatus}), retrying`;
     case "offline":
-      return `Нет связи с ${status.host}`;
+      return `Cannot connect to ${status.host}`;
     case "timeout":
-      return `Запрос не уложился в ${status.afterSecs} секунд`;
+      return `Request timed out after ${status.afterSecs} s`;
     case "unexpectedResponse":
-      return "Непонятный ответ API — возможно, limitbar устарел";
+      return "Unexpected API response — LimitBar may need an update";
     case "apiKeyMode":
-      return "Режим API-ключа: лимиты подписки не применяются";
+      return "API key mode: subscription limits do not apply";
     case "noLimitsReported":
-      return "Лимиты для этого плана не сообщаются";
+      return "No limits reported for this plan";
     case "notRunning":
-      return `Запустите ${displayName}, чтобы прочитать лимиты`;
+      return `Open ${displayName} to read its limits`;
     case "secureStorage":
-      return "Токен защищён хранилищем агента — автоматическое чтение недоступно";
+      return "The agent protects this token in secure storage — automatic access is unavailable";
     case "missingScope":
-      return "У токена нет права user:profile для чтения лимитов — выполните вход через Claude";
+      return "The token needs user:profile permission to read limits — sign in through Claude";
     case "unsupportedAuthMode":
-      return "Способ авторизации агента пока не поддерживается";
+      return "This authentication method is not supported yet";
     case "credentialsChanged":
-      return "Учётные данные изменились — обновите показания";
+      return "Credentials changed — refresh usage";
   }
 }
 
 function atTime(epochSeconds: number): string {
   const when = new Date(epochSeconds * 1000);
-  return `в ${when.getHours().toString().padStart(2, "0")}:${when
+  return `at ${when.getHours().toString().padStart(2, "0")}:${when
     .getMinutes()
     .toString()
     .padStart(2, "0")}`;
 }
 
-/** Compact, human duration: `2 ч 14 мин`, `45 мин`, `30 с`. */
+/** Compact, human duration: `2 h 14 min`, `45 min`, `30 s`. */
 export function formatDuration(totalSeconds: number): string {
   const secs = Math.max(0, Math.floor(totalSeconds));
-  if (secs < 60) return `${secs} с`;
+  if (secs < 60) return `${secs} s`;
 
   const minutes = Math.floor(secs / 60);
-  if (minutes < 60) return `${minutes} мин`;
+  if (minutes < 60) return `${minutes} min`;
 
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
   if (hours < 24) {
-    return remainingMinutes === 0 ? `${hours} ч` : `${hours} ч ${remainingMinutes} мин`;
+    return remainingMinutes === 0 ? `${hours} h` : `${hours} h ${remainingMinutes} min`;
   }
 
   const days = Math.floor(hours / 24);
   const remainingHours = hours % 24;
-  return remainingHours === 0 ? `${days} д` : `${days} д ${remainingHours} ч`;
+  return remainingHours === 0 ? `${days} d` : `${days} d ${remainingHours} h`;
 }

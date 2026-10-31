@@ -132,7 +132,7 @@ async fn cursor_grok_failure_keeps_plan_but_signals_unavailable_grok() {
         .await
         .unwrap();
     assert_eq!(reading.gauges[0].used_percent, 20.0);
-    assert!(reading.note.unwrap().contains("Grok: недоступно"));
+    assert!(reading.note.unwrap().contains("Grok: unavailable"));
 }
 
 #[tokio::test]
@@ -276,7 +276,7 @@ async fn opencode_codex_oauth_queries_only_openai_and_marks_shared_quota() {
         .await
         .unwrap();
     assert_eq!(reading.gauges[0].used_percent, 42.0);
-    assert_eq!(reading.note.as_deref(), Some("Codex · общий лимит"));
+    assert_eq!(reading.note.as_deref(), Some("Codex · shared limit"));
 }
 
 #[tokio::test]
