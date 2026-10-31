@@ -189,8 +189,26 @@ body {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  margin-bottom: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+
+.agent__head:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.agent__content { margin-top: 8px; }
+.agent__chevron { flex: none; color: var(--fg-faint); }
+.agent__head[aria-expanded="true"] .agent__chevron { transform: rotate(90deg); }
+.agent__head:hover .agent__chevron { color: var(--fg); }
 
 .agent__dot {
   flex: none;
@@ -236,9 +254,54 @@ body {
   gap: 8px;
 }
 
+.agent__extras {
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--fg-muted);
+}
+
+.agent__extras > summary {
+  width: fit-content;
+  cursor: pointer;
+  list-style: none;
+  line-height: 1.5;
+}
+
+.agent__extras > summary::-webkit-details-marker { display: none; }
+.agent__extras > summary::before {
+  content: "›";
+  display: inline-block;
+  width: 12px;
+  font-size: 12px;
+}
+.agent__extras[open] > summary::before { transform: rotate(90deg); }
+.agent__extras > summary:hover { color: var(--fg); }
+.agent__extras > summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.agent__details {
+  margin: 5px 0 0 12px;
+  padding-left: 8px;
+  border-left: 1px solid var(--sep);
+}
+.agent__detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1px 8px;
+  padding: 3px 0;
+}
+.agent__detail[hidden] { display: none; }
+.agent__detail dt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent__detail dd { margin: 0; font-variant-numeric: tabular-nums; }
+.agent__detail-expiry { grid-column: 1 / -1; font-size: 10px; text-align: right; }
+
 /* Numbers that are no longer current are visibly dimmed rather than removed. */
 .agent[data-health="stale"] .agent__bars,
-.agent[data-health="error"] .agent__bars {
+.agent[data-health="error"] .agent__bars,
+.agent[data-health="stale"] .agent__details {
   opacity: 0.45;
 }
 
@@ -249,7 +312,8 @@ body {
   color: var(--fg-muted);
 }
 
-.agent__bars:not(:empty) + .agent__message {
+.agent__bars:not(:empty) ~ .agent__message:not([hidden]),
+.agent__extras:not([hidden]) + .agent__message:not([hidden]) {
   margin-top: 8px;
 }
 

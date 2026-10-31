@@ -25,7 +25,19 @@ export const ui = {
   updatedAgo: (text: string) => `обновлено ${text} назад`,
   resetsIn: (text: string) => `сброс через ${text}`,
   resetPassed: "сброс вот-вот",
+  additionalInfo: "Дополнительно",
+  collapseAgent: (name: string) => `Свернуть секцию ${name}`,
+  expandAgent: (name: string) => `Развернуть секцию ${name}`,
+  expiresIn: (text: string) => `истекает через ${text}`,
 };
+
+export function detailLabel(label: string): string {
+  return ({ "Credits": "Кредиты", "Limit resets": "Сбросы лимита" } as Record<string, string>)[label] ?? label;
+}
+
+export function detailValue(value: string): string {
+  return ({ "Unavailable": "Нет данных", "Unlimited": "Без ограничений" } as Record<string, string>)[value] ?? value;
+}
 
 /** A sentence explaining a section's state, plus what to do about it. */
 export function statusMessage(status: AgentStatus, displayName: string): string {
@@ -39,7 +51,7 @@ export function statusMessage(status: AgentStatus, displayName: string): string 
     case "notSignedIn":
       return "Вход не выполнен — запустите агента и войдите";
     case "sessionExpired":
-      return "Сессия истекла — запустите агента, чтобы войти заново";
+      return "Токен истёк — запустите агента для обновления сессии";
     case "unauthorized":
       return "Учётные данные отклонены — выполните вход в агенте заново";
     case "rateLimited":
@@ -56,6 +68,16 @@ export function statusMessage(status: AgentStatus, displayName: string): string 
       return "Режим API-ключа: лимиты подписки не применяются";
     case "noLimitsReported":
       return "Лимиты для этого плана не сообщаются";
+    case "notRunning":
+      return `Запустите ${displayName}, чтобы прочитать лимиты`;
+    case "secureStorage":
+      return "Токен защищён хранилищем агента — автоматическое чтение недоступно";
+    case "missingScope":
+      return "У токена нет права user:profile для чтения лимитов — выполните вход через Claude";
+    case "unsupportedAuthMode":
+      return "Способ авторизации агента пока не поддерживается";
+    case "credentialsChanged":
+      return "Учётные данные изменились — обновите показания";
   }
 }
 

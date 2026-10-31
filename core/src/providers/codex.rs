@@ -1,112 +1,266 @@
-//! Codex support.
-//!
-//! The request is formed the way the agent's own CLI forms it — the endpoint and
-//! the headers below are what authorise and route the call — with one deliberate
-//! difference: the User-Agent is ours.
-
+//! Codex quotas from the existing OAuth login. No login or refresh requests.
 use async_trait::async_trait;
 use serde::Deserialize;
+use serde_json::Value;
+use std::time::Duration;
 
-use crate::model::{clamp_percent, Gauge};
-
-use super::claude::retry_after_secs;
-use super::creds::{agent_home, jwt_expiry, now, read_credentials};
-use super::{classify_transport_error, AgentReading, LimitProvider, ProviderError};
+use super::creds::{
+    agent_home, jwt_claims, jwt_expiry, non_empty, now, number, parse_reset, read_json_file,
+    read_replacing_file, slug, UsageCredentials,
+};
+use super::{classify_transport_error, response_json, AgentReading, LimitProvider, ProviderError};
+use crate::model::{Gauge, UsageDetail};
 
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 pub const HOST: &str = "chatgpt.com";
 const USAGE_PATH: &str = "/codex/usage";
-
-/// Functional header: the backend routes and authorises Codex traffic by it.
-const ORIGINATOR: &str = "codex_cli_rs";
-
-const HOUR: i64 = 3_600;
+const RESET_CREDITS_PATH: &str = "/wham/rate-limit-reset-credits";
+const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
 
 #[derive(Default)]
 pub struct CodexProvider;
 
-#[derive(Debug, Deserialize)]
-struct StoredCredentials {
-    auth_mode: Option<String>,
-    tokens: Option<Tokens>,
-}
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct UsageResponse(Value);
 
-#[derive(Debug, Deserialize)]
-struct Tokens {
-    access_token: String,
-    account_id: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct UsageResponse {
-    plan_type: Option<String>,
-    rate_limit: Option<RateLimit>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RateLimit {
-    primary_window: Option<Window>,
-    secondary_window: Option<Window>,
-}
-
-/// Codex reports a window as a percentage, its length, and the reset both as an
-/// absolute epoch second and as a countdown. We prefer the absolute value and fall
-/// back to the countdown anchored at fetch time.
-#[derive(Debug, Default, Deserialize)]
-struct Window {
-    used_percent: Option<f64>,
-    limit_window_seconds: Option<i64>,
-    reset_after_seconds: Option<i64>,
-    reset_at: Option<i64>,
-}
-
-/// Names the window by its length, because the API labels it only by duration.
-fn label_for(window_seconds: Option<i64>, fallback: &str) -> String {
-    match window_seconds {
-        Some(secs) if secs > 0 && secs % DAY == 0 => {
-            let days = secs / DAY;
-            if days == 7 {
-                "Weekly".to_string()
-            } else {
-                format!("{days}d window")
+fn load_credentials() -> Result<UsageCredentials, ProviderError> {
+    let home = agent_home("CODEX_HOME", ".codex")
+        .filter(|p| p.is_dir())
+        .ok_or(ProviderError::NotInstalled)?;
+    let stored = read_json_file(&home.join("auth.json"))?;
+    match stored.get("auth_mode").filter(|v| !v.is_null()) {
+        Some(mode) if mode == "apikey" || mode == "api_key" => {
+            return Err(ProviderError::ApiKeyMode)
+        }
+        Some(mode) if mode != "chatgpt" => return Err(ProviderError::UnsupportedAuthMode),
+        None if non_empty(&stored, "OPENAI_API_KEY").is_some() => {
+            return Err(ProviderError::ApiKeyMode)
+        }
+        _ => {}
+    }
+    let tokens = &stored["tokens"];
+    let token = non_empty(tokens, "access_token")
+        .or_else(|| non_empty(tokens, "accessToken"))
+        .ok_or(ProviderError::NotSignedIn)?;
+    if jwt_expiry(&token).is_some_and(|exp| exp <= now()) {
+        return Err(ProviderError::SessionExpired);
+    }
+    let mut account = non_empty(tokens, "account_id").or_else(|| non_empty(tokens, "accountId"));
+    if account.is_none() {
+        for jwt in [
+            non_empty(tokens, "id_token").or_else(|| non_empty(tokens, "idToken")),
+            Some(token.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(claims) = jwt_claims(&jwt) else {
+                continue;
+            };
+            account = non_empty(&claims, "chatgpt_account_id").or_else(|| {
+                non_empty(&claims["https://api.openai.com/auth"], "chatgpt_account_id")
+            });
+            if account.is_some() {
+                break;
             }
         }
-        Some(secs) if secs > 0 && secs % HOUR == 0 => format!("Session ({}h)", secs / HOUR),
-        Some(secs) if secs > 0 => format!("{}m window", (secs + 59) / 60),
-        _ => fallback.to_string(),
+    }
+    Ok(UsageCredentials::new("codex", token, account, None))
+}
+
+fn label_for(seconds: Option<i64>, fallback: &str) -> String {
+    match seconds {
+        Some(s) if s > 0 && s % DAY == 0 => {
+            if s / DAY == 7 {
+                "Weekly".into()
+            } else {
+                format!("{}d window", s / DAY)
+            }
+        }
+        Some(s) if s > 0 && s % HOUR == 0 => format!("Session ({}h)", s / HOUR),
+        Some(s) if s > 0 => format!("{}m window", s.saturating_add(59) / 60),
+        _ => fallback.into(),
     }
 }
 
+fn window(value: &Value, id: &str, label: &str, at: i64) -> Option<Gauge> {
+    let used = number(value, "used_percent")?;
+    let reset = value["reset_at"].as_i64().filter(|t| *t > 0).or_else(|| {
+        value["reset_after_seconds"]
+            .as_i64()
+            .map(|s| at.saturating_add(s.max(0)))
+    });
+    Some(Gauge::new(id, label, used, reset))
+}
+
 fn to_gauges(response: &UsageResponse, at: i64) -> Vec<Gauge> {
-    let Some(rate_limit) = response.rate_limit.as_ref() else {
-        return Vec::new();
-    };
-    [
-        ("primary", rate_limit.primary_window.as_ref(), "Primary"),
-        (
-            "secondary",
-            rate_limit.secondary_window.as_ref(),
-            "Secondary",
-        ),
+    let body = &response.0;
+    let mut gauges = Vec::new();
+    for (key, id, fallback) in [
+        ("primary_window", "primary", "Primary"),
+        ("secondary_window", "secondary", "Secondary"),
+    ] {
+        let value = &body["rate_limit"][key];
+        if let Some(gauge) = window(
+            value,
+            id,
+            &label_for(value["limit_window_seconds"].as_i64(), fallback),
+            at,
+        ) {
+            gauges.push(gauge);
+        }
+    }
+    for entry in body["additional_rate_limits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) =
+            non_empty(entry, "limit_name").or_else(|| non_empty(entry, "metered_feature"))
+        else {
+            continue;
+        };
+        let identity = non_empty(entry, "metered_feature").unwrap_or_else(|| name.clone());
+        let identity = slug(&identity);
+        if identity.is_empty() {
+            continue;
+        }
+        for (key, lane, fallback) in [
+            ("primary_window", "primary", "Primary"),
+            ("secondary_window", "secondary", "Secondary"),
+        ] {
+            let id = format!("extra:{identity}:{lane}");
+            if gauges.iter().any(|g: &Gauge| g.id == id) {
+                continue;
+            }
+            let value = &entry["rate_limit"][key];
+            let label = format!(
+                "{name} · {}",
+                label_for(value["limit_window_seconds"].as_i64(), fallback)
+            );
+            if let Some(gauge) = window(value, &id, &label, at) {
+                gauges.push(gauge);
+            }
+        }
+    }
+    let budget = [
+        &body["individual_limit"],
+        &body["individualLimit"],
+        &body["rate_limit"]["individual_limit"],
+        &body["rate_limit"]["individualLimit"],
+        &body["spend_control"]["individual_limit"],
+        &body["spend_control"]["individualLimit"],
+        &body["spendControl"]["individualLimit"],
+        &body["spendControl"]["individual_limit"],
     ]
     .into_iter()
-    .filter_map(|(id, window, fallback)| {
-        let window = window?;
-        let used_percent = window.used_percent?;
-        // `reset_at` is absolute; `reset_after_seconds` is relative to the reply, so
-        // it only means anything once anchored to the moment we asked.
-        let resets_at = window
-            .reset_at
-            .or_else(|| window.reset_after_seconds.map(|secs| at + secs.max(0)));
-        Some(Gauge::new(
-            id,
-            label_for(window.limit_window_seconds, fallback),
-            clamp_percent(used_percent),
-            resets_at,
-        ))
+    .find(|v| v.is_object());
+    if let Some(budget) = budget {
+        let used = match (
+            numeric(budget, "used"),
+            numeric(budget, "limit").filter(|v| *v > 0.0),
+        ) {
+            (Some(used), Some(limit)) if used >= 0.0 => Some(used / limit * 100.0),
+            _ => numeric(budget, "remaining_percent")
+                .or_else(|| numeric(budget, "remainingPercent"))
+                .filter(|p| (0.0..=100.0).contains(p))
+                .map(|p| 100.0 - p),
+        };
+        if let Some(used) = used {
+            let reset = parse_reset(
+                budget
+                    .get("reset_at")
+                    .or_else(|| budget.get("resets_at"))
+                    .or_else(|| budget.get("resetsAt")),
+            );
+            gauges.push(Gauge::new(
+                "monthly_credits",
+                "Monthly credits",
+                used,
+                reset,
+            ));
+        }
+    }
+    gauges
+}
+
+fn numeric(value: &Value, key: &str) -> Option<f64> {
+    number(value, key).or_else(|| {
+        value[key]
+            .as_str()?
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
     })
-    .collect()
+}
+
+fn usage_details(body: &Value) -> Vec<UsageDetail> {
+    let credits = &body["credits"];
+    let value = if credits["unlimited"] == true {
+        Some("Unlimited".into())
+    } else {
+        numeric(credits, "balance")
+            .filter(|n| *n >= 0.0)
+            .map(|n| n.to_string())
+    };
+    value
+        .map(|value| {
+            vec![UsageDetail {
+                label: "Credits".into(),
+                value,
+                expires_at: None,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+/// Keep only usable inventory; grant IDs, images and account metadata never reach the UI.
+fn reset_details(body: &Value, at: i64) -> Option<Vec<UsageDetail>> {
+    let entries = body["credits"].as_array()?;
+    let mut seen = std::collections::HashSet::new();
+    let mut available = 0;
+    let mut expiries = std::collections::BTreeMap::<i64, usize>::new();
+    for entry in entries {
+        if entry["status"] != "available" || entry["reset_type"] != "codex_rate_limits" {
+            continue;
+        }
+        let Some(id) = non_empty(entry, "id") else {
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        let reset = parse_reset(entry.get("expires_at"));
+        if entry.get("expires_at").is_some_and(|v| !v.is_null()) && reset.is_none() {
+            continue;
+        }
+        if reset.is_some_and(|t| t <= at) {
+            continue;
+        }
+        available += 1;
+        if let Some(expiry) = reset {
+            *expiries.entry(expiry).or_default() += 1;
+        }
+    }
+    let without_expiry = available - expiries.values().sum::<usize>();
+    let mut details = Vec::new();
+    if without_expiry > 0 || available == 0 {
+        details.push(UsageDetail {
+            label: "Limit resets".into(),
+            value: without_expiry.to_string(),
+            expires_at: None,
+        });
+    }
+    for (expiry, count) in expiries {
+        details.push(UsageDetail {
+            label: "Limit resets".into(),
+            value: count.to_string(),
+            expires_at: Some(expiry),
+        });
+    }
+    Some(details)
 }
 
 #[async_trait]
@@ -114,85 +268,118 @@ impl LimitProvider for CodexProvider {
     fn id(&self) -> &'static str {
         "codex"
     }
-
     fn display_name(&self) -> &'static str {
         "Codex"
     }
-
+    fn is_installed(&self) -> bool {
+        super::discovery::installed(self.id())
+    }
     fn host(&self) -> &'static str {
         HOST
     }
-
     fn default_base_url(&self) -> &'static str {
         DEFAULT_BASE_URL
     }
-
+    async fn prepare(&self) -> Result<Option<UsageCredentials>, ProviderError> {
+        read_replacing_file(load_credentials).await.map(Some)
+    }
+    async fn fetch_prepared(
+        &self,
+        http: &reqwest::Client,
+        base: &str,
+        credentials: Option<UsageCredentials>,
+    ) -> Result<AgentReading, ProviderError> {
+        let credentials = credentials.ok_or(ProviderError::NotSignedIn)?;
+        fetch_usage(
+            http,
+            base,
+            &credentials.access_token,
+            credentials.account_id.as_deref(),
+        )
+        .await
+    }
     async fn fetch(
         &self,
         http: &reqwest::Client,
-        base_url: &str,
+        base: &str,
     ) -> Result<AgentReading, ProviderError> {
-        let home = agent_home("CODEX_HOME", ".codex");
-        let stored: StoredCredentials = read_credentials(home.as_deref(), "auth.json")?;
+        self.fetch_prepared(http, base, self.prepare().await?).await
+    }
+}
 
-        // Subscription limits only exist for a ChatGPT login; an API-key setup is
-        // billed per request and has nothing for us to draw.
-        if stored.auth_mode.as_deref() != Some("chatgpt") {
-            return Err(ProviderError::ApiKeyMode);
-        }
-        let tokens = stored.tokens.ok_or(ProviderError::NotSignedIn)?;
-
-        // Codex stores no expiry next to the token, so we read the JWT's own `exp`.
-        if let Some(exp) = jwt_expiry(&tokens.access_token) {
-            if exp <= now() {
-                return Err(ProviderError::SessionExpired);
-            }
-        }
-
-        let mut request = http
-            .get(format!("{}{}", base_url.trim_end_matches('/'), USAGE_PATH))
-            .header("Authorization", format!("Bearer {}", tokens.access_token))
-            .header("Accept", "application/json")
-            .header("originator", ORIGINATOR);
-        if let Some(account_id) = tokens.account_id.as_deref() {
-            request = request.header("chatgpt-account-id", account_id);
-        }
-
-        let response = request
+/// Resource reads reuse the stored token. Never renew or replace it.
+pub async fn fetch_usage(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+    account: Option<&str>,
+) -> Result<AgentReading, ProviderError> {
+    if jwt_expiry(token).is_some_and(|exp| exp <= now()) {
+        return Err(ProviderError::SessionExpired);
+    }
+    let mut request = http
+        .get(format!("{}{USAGE_PATH}", base.trim_end_matches('/')))
+        .bearer_auth(token)
+        .header("Accept", "application/json")
+        .header("originator", "codex_cli_rs");
+    if let Some(account) = account {
+        request = request.header("chatgpt-account-id", account);
+    }
+    let body = response_json(
+        request
             .send()
             .await
-            .map_err(|err| classify_transport_error(&err, HOST))?;
-
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ProviderError::Unauthorized);
+            .map_err(|e| classify_transport_error(&e, HOST))?,
+        HOST,
+    )
+    .await?;
+    if !body.is_object() {
+        return Err(ProviderError::Malformed("Expected usage object".into()));
+    }
+    let mut reading = AgentReading {
+        gauges: to_gauges(&UsageResponse(body.clone()), now()),
+        note: non_empty(&body, "plan_type"),
+        details: usage_details(&body),
+        ..Default::default()
+    };
+    let mut request = http
+        .get(format!(
+            "{}{RESET_CREDITS_PATH}",
+            base.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .header("Accept", "application/json")
+        .header("OpenAI-Beta", "codex-1")
+        .header("originator", "Codex Desktop")
+        .timeout(Duration::from_secs(4));
+    if let Some(account) = account {
+        request = request.header("chatgpt-account-id", account);
+    }
+    let inventory = match request.send().await {
+        Ok(response) => response_json(response, HOST).await,
+        Err(error) => Err(classify_transport_error(&error, HOST)),
+    };
+    match inventory {
+        Ok(inventory) => {
+            if let Some(details) = reset_details(&inventory, now()) {
+                reading.details.extend(details);
+            }
         }
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(ProviderError::RateLimited {
-                retry_after: retry_after_secs(response.headers()),
+        Err(error) => {
+            if let ProviderError::RateLimited { retry_after } = error {
+                reading.retry_after = Some(retry_after.unwrap_or(300));
+            }
+            reading.details.push(UsageDetail {
+                label: "Limit resets".into(),
+                value: "Unavailable".into(),
+                expires_at: None,
             });
         }
-        if !status.is_success() {
-            return Err(ProviderError::ServiceUnavailable(status.as_u16()));
-        }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|err| classify_transport_error(&err, HOST))?;
-        let parsed: UsageResponse =
-            serde_json::from_str(&body).map_err(|err| ProviderError::Malformed(err.to_string()))?;
-
-        let gauges = to_gauges(&parsed, now());
-        if gauges.is_empty() {
-            return Err(ProviderError::NoLimitsReported);
-        }
-
-        Ok(AgentReading {
-            gauges,
-            note: parsed.plan_type,
-        })
     }
+    if reading.gauges.is_empty() && reading.details.iter().all(|d| d.value == "Unavailable") {
+        return Err(ProviderError::NoLimitsReported);
+    }
+    Ok(reading)
 }
 
 #[cfg(test)]
@@ -291,5 +478,53 @@ mod tests {
             r#"{"rate_limit":{"primary_window":{"used_percent":142.0,"limit_window_seconds":18000}}}"#,
         );
         assert_eq!(to_gauges(&parsed, 0)[0].used_percent, 100.0);
+    }
+
+    #[test]
+    fn additional_windows_and_monthly_budget_survive_invalid_primary() {
+        let body = serde_json::json!({"rate_limit": {
+            "primary_window":{"used_percent":"bad"},
+            "secondary_window":{"used_percent":15,"limit_window_seconds":604800}
+        },"additional_rate_limits":[false, {"limit_name":"Fixture Spark","metered_feature":"fixture-spark","rate_limit":{
+            "primary_window":{"used_percent":25,"limit_window_seconds":18000,"reset_at":0,"reset_after_seconds":60},
+            "secondary_window":{"used_percent":35,"limit_window_seconds":604800}
+        }}],"spend_control":{"individual_limit":{"used":"125","limit":"500","reset_at":12345}}});
+        let gauges = to_gauges(&UsageResponse(body), 1000);
+        assert_eq!(gauges.len(), 4);
+        assert_eq!(gauges[0].id, "secondary");
+        assert_eq!(gauges[1].id, "extra:fixture-spark:primary");
+        assert_eq!(gauges[1].resets_at, Some(1060));
+        assert_eq!(gauges[2].used_percent, 35.0);
+        assert_eq!(gauges[3].used_percent, 25.0);
+        assert_eq!(gauges[3].resets_at, Some(12345));
+    }
+
+    #[test]
+    fn credit_balances_are_details_and_reset_inventory_filters_expiry_and_status() {
+        let body = serde_json::json!({"credits":{"balance":"123.5"}});
+        assert_eq!(usage_details(&body)[0].value, "123.5");
+        assert!(to_gauges(&UsageResponse(body), 0).is_empty());
+        let inventory = serde_json::json!({"available_count":99,"credits":[
+            {"id":"a","status":"available","reset_type":"codex_rate_limits","expires_at":"2099-01-01T00:00:00Z"},
+            {"id":"a","status":"available","reset_type":"codex_rate_limits","expires_at":"2099-01-01T00:00:00Z"},
+            {"id":"b","status":"available","reset_type":"codex_rate_limits","expires_at":"2000-01-01T00:00:00Z"},
+            {"id":"c","status":"used","reset_type":"codex_rate_limits"},
+            {"id":"d","status":"available","reset_type":"different"},
+            {"id":"e","status":"available","reset_type":"codex_rate_limits","expires_at":"invalid"},
+            {"status":"available","reset_type":"codex_rate_limits"},
+            {"id":"f","status":"available","reset_type":"codex_rate_limits"}
+        ]});
+        let details = reset_details(&inventory, now()).unwrap();
+        assert_eq!(details.len(), 2);
+        assert_eq!(
+            details
+                .iter()
+                .map(|d| d.value.parse::<usize>().unwrap())
+                .sum::<usize>(),
+            2
+        );
+        assert!(details[1].expires_at.is_some());
+        let serialized = serde_json::to_string(&details).unwrap();
+        assert!(!serialized.contains("2099-") && !serialized.contains("reset_type"));
     }
 }

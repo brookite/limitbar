@@ -24,6 +24,13 @@ async fn main() {
                 gauge.label, gauge.used_percent, gauge.severity
             );
         }
+        for detail in &agent.details {
+            let expiry = detail
+                .expires_at
+                .map(|at| format!(" (expires in {}s)", at - snapshot.fetched_at))
+                .unwrap_or_default();
+            println!("  {}: {}{expiry}", detail.label, detail.value);
+        }
         println!();
     }
 }

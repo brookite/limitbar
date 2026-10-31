@@ -1,5 +1,6 @@
-//! Persisted widget preferences: refresh period and whether the window is pinned.
+//! Persisted widget preferences: refresh period, pin state and collapsed agents.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,8 @@ use crate::providers::creds::{first_non_empty_env, home_dir};
 pub struct Settings {
     pub interval_secs: u64,
     pub always_on_top: bool,
+    #[serde(default)]
+    pub collapsed_agents: BTreeSet<String>,
 }
 
 impl Default for Settings {
@@ -19,6 +22,7 @@ impl Default for Settings {
         Self {
             interval_secs: DEFAULT_INTERVAL_SECS,
             always_on_top: false,
+            collapsed_agents: BTreeSet::new(),
         }
     }
 }
@@ -88,6 +92,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.interval_secs, 45);
         assert!(!s.always_on_top);
+        assert!(s.collapsed_agents.is_empty());
     }
 
     #[test]
@@ -124,14 +129,28 @@ mod tests {
     }
 
     #[test]
+    fn older_settings_preserve_preferences_and_expand_all_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"intervalSecs":90,"alwaysOnTop":true}"#).unwrap();
+        let loaded = load_from(&path);
+        assert_eq!(loaded.interval_secs, 90);
+        assert!(loaded.always_on_top);
+        assert!(loaded.collapsed_agents.is_empty());
+    }
+
+    #[test]
     fn settings_survive_a_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("settings.json");
-        let settings = Settings {
-            interval_secs: 120,
-            always_on_top: true,
-        };
-        save_to(&path, &settings).unwrap();
-        assert_eq!(load_from(&path), settings);
+        for interval_secs in crate::model::INTERVAL_CHOICES {
+            let settings = Settings {
+                interval_secs,
+                always_on_top: true,
+                collapsed_agents: BTreeSet::from(["codex".into(), "cursor".into()]),
+            };
+            save_to(&path, &settings).unwrap();
+            assert_eq!(load_from(&path), settings);
+        }
     }
 }

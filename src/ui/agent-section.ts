@@ -6,10 +6,10 @@
  * as an agent flips between working and failing.
  */
 
-import type { AgentSnapshot, Gauge } from "../model";
+import type { AgentSnapshot, Gauge, UsageDetail } from "../model";
 import { healthOf } from "../model";
 import { createGauge, type GaugeView } from "./gauge";
-import { formatDuration, statusMessage, ui } from "./strings";
+import { detailLabel, detailValue, formatDuration, statusMessage, ui } from "./strings";
 
 export interface SectionView {
   readonly root: HTMLElement;
@@ -17,11 +17,15 @@ export interface SectionView {
   tick(now: number): void;
 }
 
-export function createSection(agent: AgentSnapshot): SectionView {
+export function createSection(agent: AgentSnapshot, options: {
+  collapsed: boolean;
+  onCollapsedChange(collapsed: boolean): void;
+}): SectionView {
   const root = document.createElement("section");
   root.className = "agent";
 
-  const head = document.createElement("header");
+  const head = document.createElement("button");
+  head.type = "button";
   head.className = "agent__head";
 
   const dot = document.createElement("span");
@@ -33,7 +37,29 @@ export function createSection(agent: AgentSnapshot): SectionView {
   const note = document.createElement("span");
   note.className = "agent__note";
 
-  head.append(dot, name, note);
+  const chevron = document.createElement("span");
+  chevron.className = "agent__chevron";
+  chevron.textContent = "›";
+  chevron.setAttribute("aria-hidden", "true");
+  head.append(dot, name, note, chevron);
+
+  const content = document.createElement("div");
+  content.className = "agent__content";
+  content.id = `agent-content-${agent.id}`;
+  head.setAttribute("aria-controls", content.id);
+  let collapsed = options.collapsed;
+  function renderCollapsed(): void {
+    content.hidden = collapsed;
+    head.setAttribute("aria-expanded", String(!collapsed));
+    const label = collapsed ? ui.expandAgent(name.textContent ?? "") : ui.collapseAgent(name.textContent ?? "");
+    head.setAttribute("aria-label", label);
+    head.title = label;
+  }
+  head.addEventListener("click", () => {
+    collapsed = !collapsed;
+    renderCollapsed();
+    options.onCollapsedChange(collapsed);
+  });
 
   const bars = document.createElement("div");
   bars.className = "agent__bars";
@@ -41,7 +67,16 @@ export function createSection(agent: AgentSnapshot): SectionView {
   const message = document.createElement("p");
   message.className = "agent__message";
 
-  root.append(head, bars, message);
+  const extras = document.createElement("details");
+  extras.className = "agent__extras";
+  const summary = document.createElement("summary");
+  summary.textContent = ui.additionalInfo;
+  const details = document.createElement("dl");
+  details.className = "agent__details";
+  extras.append(summary, details);
+  let detailRows: { entry: UsageDetail; row: HTMLElement; expiry: HTMLElement }[] = [];
+  content.append(bars, extras, message);
+  root.append(head, content);
 
   const gauges = new Map<string, GaugeView>();
 
@@ -49,6 +84,7 @@ export function createSection(agent: AgentSnapshot): SectionView {
     root,
     update(next, now) {
       name.textContent = next.displayName;
+      renderCollapsed();
       root.dataset.health = healthOf(next.status);
 
       const parts: string[] = [];
@@ -57,6 +93,20 @@ export function createSection(agent: AgentSnapshot): SectionView {
       note.textContent = parts.join(" · ");
 
       syncGauges(bars, gauges, next.gauges);
+      detailRows = (next.details ?? []).map(entry => {
+        const row = document.createElement("div");
+        row.className = "agent__detail";
+        const label = document.createElement("dt");
+        label.textContent = detailLabel(entry.label);
+        label.title = label.textContent;
+        const value = document.createElement("dd");
+        value.textContent = detailValue(entry.value);
+        const expiry = document.createElement("dd");
+        expiry.className = "agent__detail-expiry";
+        row.append(label, value, expiry);
+        return { entry, row, expiry };
+      });
+      details.replaceChildren(...detailRows.map(d => d.row));
 
       const text = statusMessage(next.status, next.displayName);
       message.textContent = text;
@@ -67,6 +117,12 @@ export function createSection(agent: AgentSnapshot): SectionView {
     },
     tick(now) {
       for (const gauge of gauges.values()) gauge.tick(now);
+      for (const { entry, row, expiry } of detailRows) {
+        row.hidden = entry.expiresAt !== null && entry.expiresAt <= now;
+        expiry.hidden = entry.expiresAt === null;
+        expiry.textContent = entry.expiresAt === null ? "" : ui.expiresIn(formatDuration(entry.expiresAt - now));
+      }
+      extras.hidden = detailRows.every(d => d.row.hidden);
     },
   };
 

@@ -1,28 +1,19 @@
-//! Claude Code support.
-//!
-//! The request is formed the way the agent's own CLI forms it — the endpoint and
-//! the headers below are what authorise and route the call — with one deliberate
-//! difference: the User-Agent is ours.
-
+//! Claude usage from the existing on-disk login. No token refresh or auth writes.
 use async_trait::async_trait;
 use serde::Deserialize;
+use serde_json::Value;
 
-use crate::model::{clamp_percent, Gauge};
-
-use super::creds::{agent_home, is_window_live, now, parse_reset, read_credentials};
-use super::{classify_transport_error, AgentReading, LimitProvider, ProviderError};
+use super::creds::{
+    agent_home, is_window_live, non_empty, now, number, parse_reset, read_json_file,
+    read_replacing_file, slug, UsageCredentials,
+};
+use super::{classify_transport_error, response_json, AgentReading, LimitProvider, ProviderError};
+use crate::model::Gauge;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const HOST: &str = "api.anthropic.com";
 const USAGE_PATH: &str = "/api/oauth/usage";
 
-/// Required by the endpoint; these values are not ours to choose.
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
-const CLIENT_PLATFORM: &str = "claude_code_cli";
-
-/// The windows we render, in the order they appear in the widget, with the names
-/// Claude Code uses for them in its own limit messages.
 const WINDOWS: [(&str, &str); 6] = [
     ("five_hour", "Session (5h)"),
     ("seven_day", "Weekly"),
@@ -35,78 +26,105 @@ const WINDOWS: [(&str, &str); 6] = [
 #[derive(Default)]
 pub struct ClaudeProvider;
 
-#[derive(Debug, Deserialize)]
-struct StoredCredentials {
-    #[serde(rename = "claudeAiOauth")]
-    oauth: Option<OAuthCredentials>,
-}
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct UsageResponse(Value);
 
-#[derive(Debug, Deserialize)]
-struct OAuthCredentials {
-    #[serde(rename = "accessToken")]
-    access_token: String,
-    /// Milliseconds since the epoch, as Claude Code stores it.
-    #[serde(rename = "expiresAt")]
-    expires_at: Option<i64>,
-    #[serde(rename = "subscriptionType")]
-    subscription_type: Option<String>,
-}
-
-/// One limit window.
-///
-/// `utilization` is already a percentage (0..100) — cross-checked against the
-/// sibling `limits[].percent`, which carries the same number. `resets_at` arrives
-/// as an RFC 3339 string, so it is kept raw and parsed by [`parse_reset`].
-#[derive(Debug, Default, Deserialize)]
-struct UsageWindow {
-    utilization: Option<f64>,
-    resets_at: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct UsageResponse {
-    five_hour: Option<UsageWindow>,
-    seven_day: Option<UsageWindow>,
-    seven_day_opus: Option<UsageWindow>,
-    seven_day_sonnet: Option<UsageWindow>,
-    seven_day_oauth_apps: Option<UsageWindow>,
-    cinder_cove: Option<UsageWindow>,
-}
-
-impl UsageResponse {
-    fn window(&self, key: &str) -> Option<&UsageWindow> {
-        match key {
-            "five_hour" => self.five_hour.as_ref(),
-            "seven_day" => self.seven_day.as_ref(),
-            "seven_day_opus" => self.seven_day_opus.as_ref(),
-            "seven_day_sonnet" => self.seven_day_sonnet.as_ref(),
-            "seven_day_oauth_apps" => self.seven_day_oauth_apps.as_ref(),
-            "cinder_cove" => self.cinder_cove.as_ref(),
-            _ => None,
+fn load_credentials() -> Result<UsageCredentials, ProviderError> {
+    let home = agent_home("CLAUDE_CONFIG_DIR", ".claude").ok_or(ProviderError::NotSignedIn)?;
+    let stored = read_json_file(&home.join(".credentials.json"))?;
+    let oauth = &stored["claudeAiOauth"];
+    let token = non_empty(oauth, "accessToken").ok_or(ProviderError::NotSignedIn)?;
+    if number(oauth, "expiresAt").is_some_and(|t| t <= now() as f64 * 1000.0) {
+        return Err(ProviderError::SessionExpired);
+    }
+    // Missing scope metadata is unknown, not proof of insufficient permissions.
+    if let Some(scopes) = oauth["scopes"].as_array() {
+        if scopes.iter().all(Value::is_string) && !scopes.iter().any(|s| s == "user:profile") {
+            return Err(ProviderError::MissingScope);
         }
     }
+    let mut note = non_empty(oauth, "subscriptionType");
+    if note.as_deref() == Some("max") {
+        if let Some(tier) = non_empty(oauth, "rateLimitTier") {
+            if let Some(multiplier) = tier
+                .split('_')
+                .find(|p| p.ends_with('x') && p.trim_end_matches('x').parse::<u32>().is_ok())
+            {
+                note = Some(format!("max {multiplier}"));
+            }
+        }
+    }
+    Ok(UsageCredentials::new("claude", token, None, note))
+}
+
+fn usage_window(value: &Value, id: &str, label: &str) -> Option<Gauge> {
+    let used = number(value, "utilization")?;
+    let reset = parse_reset(value.get("resets_at"));
+    is_window_live(reset).then(|| Gauge::new(id, label, used, reset))
 }
 
 fn to_gauges(response: &UsageResponse) -> Vec<Gauge> {
-    WINDOWS
+    let body = &response.0;
+    let mut gauges: Vec<Gauge> = WINDOWS
         .iter()
-        .filter_map(|(key, label)| {
-            let window = response.window(key)?;
-            // A window the API reports as empty, or one whose reset has already
-            // passed, is not a live limit; Claude Code hides those too.
-            let utilization = window.utilization?;
-            let resets_at = parse_reset(window.resets_at.as_ref());
-            if !is_window_live(resets_at) {
-                return None;
+        .filter_map(|(key, label)| usage_window(&body[*key], key, label))
+        .collect();
+    for entry in body["limits"].as_array().into_iter().flatten() {
+        if entry["kind"] != "weekly_scoped" || entry["group"] != "weekly" {
+            continue;
+        }
+        let model = &entry["scope"]["model"];
+        let Some(name) = non_empty(model, "display_name") else {
+            continue;
+        };
+        let identity = non_empty(model, "id").unwrap_or_else(|| name.clone());
+        if slug(&name) == "all-models" || slug(&identity).ends_with("all-models") {
+            continue;
+        }
+        let Some(used) = number(entry, "percent") else {
+            continue;
+        };
+        let id = format!("weekly_scoped:{}", slug(&identity));
+        if gauges.iter().any(|g| g.id == id) {
+            continue;
+        }
+        let reset = parse_reset(entry.get("resets_at"));
+        if is_window_live(reset) {
+            gauges.push(Gauge::new(id, format!("{name} (7d)"), used, reset));
+        }
+    }
+    for alias in [
+        "seven_day_routines",
+        "seven_day_claude_routines",
+        "claude_routines",
+        "routines",
+        "routine",
+        "seven_day_cowork",
+        "cowork",
+    ] {
+        if let Some(gauge) = usage_window(&body[alias], "routines", "Routines / Cowork (7d)") {
+            gauges.push(gauge);
+            break;
+        }
+    }
+    let extra = &body["extra_usage"];
+    if extra["is_enabled"] == true {
+        if let (Some(used), Some(limit)) = (
+            number(extra, "used_credits"),
+            number(extra, "monthly_limit").filter(|n| *n > 0.0),
+        ) {
+            if used >= 0.0 {
+                gauges.push(Gauge::new(
+                    "extra_usage",
+                    "Extra usage (monthly)",
+                    used / limit * 100.0,
+                    None,
+                ));
             }
-            Some(Gauge::new(
-                *key,
-                *label,
-                clamp_percent(utilization),
-                resets_at,
-            ))
-        })
-        .collect()
+        }
+    }
+    gauges
 }
 
 #[async_trait]
@@ -114,88 +132,89 @@ impl LimitProvider for ClaudeProvider {
     fn id(&self) -> &'static str {
         "claude"
     }
-
     fn display_name(&self) -> &'static str {
         "Claude Code"
     }
-
+    fn is_installed(&self) -> bool {
+        super::discovery::installed(self.id())
+    }
     fn host(&self) -> &'static str {
         HOST
     }
-
     fn default_base_url(&self) -> &'static str {
         DEFAULT_BASE_URL
     }
-
+    async fn prepare(&self) -> Result<Option<UsageCredentials>, ProviderError> {
+        read_replacing_file(load_credentials).await.map(Some)
+    }
+    async fn fetch_prepared(
+        &self,
+        http: &reqwest::Client,
+        base: &str,
+        credentials: Option<UsageCredentials>,
+    ) -> Result<AgentReading, ProviderError> {
+        let credentials = credentials.ok_or(ProviderError::NotSignedIn)?;
+        fetch_usage(http, base, &credentials.access_token, credentials.note).await
+    }
     async fn fetch(
         &self,
         http: &reqwest::Client,
-        base_url: &str,
+        base: &str,
     ) -> Result<AgentReading, ProviderError> {
-        let home = agent_home("CLAUDE_CONFIG_DIR", ".claude");
-        let stored: StoredCredentials = read_credentials(home.as_deref(), ".credentials.json")?;
-        let oauth = stored.oauth.ok_or(ProviderError::NotSignedIn)?;
-
-        // `expiresAt` is in milliseconds. We check it before spending a request so a
-        // logged-out user gets a useful instruction instead of a bare 401.
-        if let Some(expires_at) = oauth.expires_at {
-            if expires_at <= now().saturating_mul(1000) {
-                return Err(ProviderError::SessionExpired);
-            }
-        }
-
-        let response = http
-            .get(format!("{}{}", base_url.trim_end_matches('/'), USAGE_PATH))
-            .header("Authorization", format!("Bearer {}", oauth.access_token))
-            .header("Content-Type", "application/json")
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("anthropic-beta", ANTHROPIC_BETA)
-            .header("anthropic-client-platform", CLIENT_PLATFORM)
-            .send()
-            .await
-            .map_err(|err| classify_transport_error(&err, HOST))?;
-
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ProviderError::Unauthorized);
-        }
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(ProviderError::RateLimited {
-                retry_after: retry_after_secs(response.headers()),
-            });
-        }
-        if !status.is_success() {
-            return Err(ProviderError::ServiceUnavailable(status.as_u16()));
-        }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|err| classify_transport_error(&err, HOST))?;
-        let parsed: UsageResponse =
-            serde_json::from_str(&body).map_err(|err| ProviderError::Malformed(err.to_string()))?;
-
-        let gauges = to_gauges(&parsed);
-        if gauges.is_empty() {
-            return Err(ProviderError::NoLimitsReported);
-        }
-
-        Ok(AgentReading {
-            gauges,
-            note: oauth.subscription_type,
-        })
+        self.fetch_prepared(http, base, self.prepare().await?).await
     }
 }
 
-/// Honours the server's own cooling-off period when it states one.
+/// Also used by OpenCode with its existing Anthropic OAuth credential.
+pub async fn fetch_usage(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+    note: Option<String>,
+) -> Result<AgentReading, ProviderError> {
+    let response = http
+        .get(format!("{}{USAGE_PATH}", base.trim_end_matches('/')))
+        .bearer_auth(token)
+        .header("Content-Type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("anthropic-client-platform", "claude_code_cli")
+        .send()
+        .await
+        .map_err(|e| classify_transport_error(&e, HOST))?;
+    let body = response_json(response, HOST).await?;
+    if !body.is_object() {
+        return Err(ProviderError::Malformed("Expected usage object".into()));
+    }
+    let gauges = to_gauges(&UsageResponse(body));
+    if gauges.is_empty() {
+        return Err(ProviderError::NoLimitsReported);
+    }
+    Ok(AgentReading {
+        gauges,
+        note,
+        ..Default::default()
+    })
+}
+
+/// Both standard forms of Retry-After; the caller still enforces a polling floor.
 pub fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
+    retry_after_at(headers, now())
+}
+
+fn retry_after_at(headers: &reqwest::header::HeaderMap, at: i64) -> Option<u64> {
+    let value = headers
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
         .ok()?
-        .trim()
-        .parse()
-        .ok()
+        .trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds);
+    }
+    let reset = chrono::DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .timestamp();
+    Some(reset.saturating_sub(at).max(0) as u64)
 }
 
 #[cfg(test)]
@@ -308,9 +327,62 @@ mod tests {
             "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
         );
         assert_eq!(
-            retry_after_secs(&headers),
-            None,
-            "http-date form is left to our own ladder"
+            retry_after_at(&headers, 1_792_567_680 - 120),
+            Some(120),
+            "HTTP dates are anchored to fetch time"
         );
+    }
+
+    #[test]
+    fn scoped_and_routines_windows_survive_broken_siblings() {
+        let at = future();
+        let body = serde_json::json!({
+            "five_hour":{"utilization":12,"resets_at":at},
+            "seven_day":{"utilization":"broken"},
+            "seven_day_opus":[],
+            "seven_day_cowork":{"utilization":7},
+            "extra_usage":{"is_enabled":true,"used_credits":150,"monthly_limit":1000},
+            "limits":[null, {"kind":"weekly_scoped","group":"weekly","percent":42,"scope":{"model":{"id":"fixture-v1","display_name":"Fixture Model"}}},
+                {"kind":"weekly_scoped","group":"weekly","percent":99,"scope":{"model":{"id":"fixture-v1","display_name":"Fixture Model"}}},
+                {"kind":"weekly_scoped","group":"weekly","percent":8,"scope":{"model":{"display_name":"All models"}}}]
+        });
+        let gauges = to_gauges(&UsageResponse(body));
+        assert_eq!(
+            gauges.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            [
+                "five_hour",
+                "weekly_scoped:fixture-v1",
+                "routines",
+                "extra_usage"
+            ]
+        );
+        assert_eq!(gauges[1].used_percent, 42.0);
+        assert_eq!(gauges[3].used_percent, 15.0);
+        assert_eq!(gauges[3].resets_at, None);
+    }
+
+    #[test]
+    fn invalid_or_unlimited_extra_spend_is_not_a_zero_gauge() {
+        for extra in [
+            serde_json::json!({"is_enabled":false,"monthly_limit":100,"used_credits":10}),
+            serde_json::json!({"is_enabled":true,"monthly_limit":null,"used_credits":10}),
+            serde_json::json!({"is_enabled":true,"monthly_limit":0,"used_credits":10}),
+        ] {
+            assert!(to_gauges(&UsageResponse(serde_json::json!({"extra_usage":extra}))).is_empty());
+        }
+    }
+
+    #[test]
+    fn retry_after_handles_past_dates_and_rejects_invalid_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for invalid in ["invalid", "-30", "NaN"] {
+            headers.insert("Retry-After", invalid.parse().unwrap());
+            assert_eq!(retry_after_at(&headers, 1_792_567_680), None);
+        }
+        headers.insert(
+            "Retry-After",
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after_at(&headers, 1_792_567_681), Some(0));
     }
 }

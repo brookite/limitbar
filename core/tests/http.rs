@@ -10,11 +10,50 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use async_trait::async_trait;
 use base64::Engine;
 use limitbar_core::model::AgentStatus;
-use limitbar_core::providers::{claude, codex, LimitProvider, Monitor, ProviderError};
+use limitbar_core::providers::{
+    claude, codex, AgentReading, LimitProvider, Monitor, ProviderError,
+};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+// Monitor tests inject installation evidence; they must never query real agents
+// installed on the developer's machine.
+struct Installed<T>(T, bool);
+#[async_trait]
+impl<T: LimitProvider> LimitProvider for Installed<T> {
+    fn id(&self) -> &'static str {
+        self.0.id()
+    }
+    fn display_name(&self) -> &'static str {
+        self.0.display_name()
+    }
+    fn is_installed(&self) -> bool {
+        self.1
+    }
+    fn host(&self) -> &'static str {
+        self.0.host()
+    }
+    fn default_base_url(&self) -> &'static str {
+        self.0.default_base_url()
+    }
+    async fn fetch(
+        &self,
+        http: &reqwest::Client,
+        base: &str,
+    ) -> Result<AgentReading, ProviderError> {
+        self.0.fetch(http, base).await
+    }
+}
+
+fn test_providers() -> Vec<Box<dyn LimitProvider>> {
+    vec![
+        Box::new(Installed(claude::ClaudeProvider, true)),
+        Box::new(Installed(codex::CodexProvider, false)),
+    ]
+}
 
 /// Credential discovery goes through environment variables, which are per-process,
 /// so these tests take turns rather than running concurrently.
@@ -339,18 +378,16 @@ async fn one_broken_agent_does_not_take_the_other_down_with_it() {
         .mount(&server)
         .await;
 
-    let mut monitor = Monitor::new(limitbar_core::default_providers());
+    let mut monitor = Monitor::new(test_providers());
     monitor.set_base_url("claude", server.uri());
     monitor.set_base_url("codex", server.uri());
 
     let snapshot = monitor.refresh().await;
     let claude_agent = snapshot.agents.iter().find(|a| a.id == "claude").unwrap();
-    let codex_agent = snapshot.agents.iter().find(|a| a.id == "codex").unwrap();
 
     assert_eq!(claude_agent.status, AgentStatus::Ok);
     assert_eq!(claude_agent.gauges.len(), 2);
-    assert_eq!(codex_agent.status, AgentStatus::NotInstalled);
-    assert!(codex_agent.gauges.is_empty());
+    assert!(snapshot.agents.iter().all(|a| a.id != "codex"));
 
     std::env::remove_var("CLAUDE_CONFIG_DIR");
     std::env::remove_var("CODEX_HOME");
@@ -372,7 +409,7 @@ async fn a_throttled_agent_is_not_polled_again_until_its_hold_expires() {
         .mount(&server)
         .await;
 
-    let mut monitor = Monitor::new(limitbar_core::default_providers());
+    let mut monitor = Monitor::new(test_providers());
     monitor.set_base_url("claude", server.uri());
 
     let first = monitor.refresh().await;

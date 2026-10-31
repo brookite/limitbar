@@ -24,7 +24,8 @@ import "./style.css";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("#app is missing from index.html");
 
-let settings: Settings = { intervalSecs: 45, alwaysOnTop: false };
+let settings: Settings = { intervalSecs: 45, alwaysOnTop: false, collapsedAgents: [] };
+let settingsWrites: Promise<void> = Promise.resolve();
 let pollTimer: number | undefined;
 let inFlight = false;
 let lastFetchedAt: number | null = null;
@@ -91,15 +92,19 @@ async function start(): Promise<void> {
   schedule();
 }
 
-async function persist(next: Settings): Promise<void> {
-  // A failed write must not cost the user the change they just made: the setting
-  // still applies for this session, it simply will not be remembered.
-  try {
-    settings = await saveSettings(next);
-  } catch (error) {
-    console.error("limitbar: could not save settings", error);
-    settings = next;
-  }
+function persist(next: Settings): Promise<void> {
+  // Apply immediately and serialize writes so rapid toggles cannot overwrite
+  // each other. A failed write still leaves the preference active this session.
+  settings = next;
+  settingsWrites = settingsWrites.then(async () => {
+    try {
+      const saved = await saveSettings(next);
+      if (settings === next) settings = saved;
+    } catch (error) {
+      console.error("limitbar: could not save settings", error);
+    }
+  });
+  return settingsWrites;
 }
 
 function schedule(): void {
@@ -182,7 +187,15 @@ function upsert(agent: AgentSnapshot, now: number): void {
     body.append(existing.root);
     return;
   }
-  const created = createSection(agent);
+  const created = createSection(agent, {
+    collapsed: settings.collapsedAgents.includes(agent.id),
+    onCollapsedChange(collapsed) {
+      const ids = new Set(settings.collapsedAgents);
+      if (collapsed) ids.add(agent.id);
+      else ids.delete(agent.id);
+      void persist({ ...settings, collapsedAgents: [...ids] });
+    },
+  });
   sections.set(agent.id, created);
   body.append(created.root);
 }

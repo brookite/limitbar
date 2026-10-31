@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const MANUAL_INTERVAL_SECS: u64 = 0;
 
 /// Refresh periods offered by the widget, in seconds, in menu order.
-pub const INTERVAL_CHOICES: [u64; 6] = [MANUAL_INTERVAL_SECS, 15, 30, 45, 60, 120];
+pub const INTERVAL_CHOICES: [u64; 8] = [MANUAL_INTERVAL_SECS, 15, 30, 45, 60, 90, 120, 180];
 pub const DEFAULT_INTERVAL_SECS: u64 = 45;
 
 /// The fastest *automatic* period the menu offers. Manual is not a faster period,
@@ -39,6 +39,8 @@ pub struct AgentSnapshot {
     pub gauges: Vec<Gauge>,
     /// Free-form detail for the section header, e.g. the subscription plan.
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<UsageDetail>,
 }
 
 impl AgentSnapshot {
@@ -49,6 +51,7 @@ impl AgentSnapshot {
             status,
             gauges: Vec::new(),
             note: None,
+            details: Vec::new(),
         }
     }
 }
@@ -93,6 +96,20 @@ pub enum AgentStatus {
     ApiKeyMode,
     /// The call succeeded but reported no active limit windows.
     NoLimitsReported,
+    NotRunning,
+    SecureStorage,
+    MissingScope,
+    UnsupportedAuthMode,
+    CredentialsChanged,
+}
+
+/// Non-percentage metadata; expiry is distinct from a recurring quota reset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDetail {
+    pub label: String,
+    pub value: String,
+    pub expires_at: Option<i64>,
 }
 
 impl AgentStatus {

@@ -20,7 +20,12 @@ export type AgentStatus =
   | { kind: "timeout"; afterSecs: number }
   | { kind: "unexpectedResponse" }
   | { kind: "apiKeyMode" }
-  | { kind: "noLimitsReported" };
+  | { kind: "noLimitsReported" }
+  | { kind: "notRunning" }
+  | { kind: "secureStorage" }
+  | { kind: "missingScope" }
+  | { kind: "unsupportedAuthMode" }
+  | { kind: "credentialsChanged" };
 
 export interface Gauge {
   id: string;
@@ -36,6 +41,13 @@ export interface AgentSnapshot {
   status: AgentStatus;
   gauges: Gauge[];
   note: string | null;
+  details?: UsageDetail[];
+}
+
+export interface UsageDetail {
+  label: string;
+  value: string;
+  expiresAt: number | null;
 }
 
 export interface Snapshot {
@@ -46,6 +58,7 @@ export interface Snapshot {
 export interface Settings {
   intervalSecs: number;
   alwaysOnTop: boolean;
+  collapsedAgents: string[];
 }
 
 /** The dot next to a section heading. */
@@ -61,6 +74,8 @@ export function healthOf(status: AgentStatus): Health {
     case "notSignedIn":
     case "apiKeyMode":
     case "noLimitsReported":
+    case "notRunning":
+    case "secureStorage":
       return "idle";
     default:
       return "error";

@@ -8,8 +8,107 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 
 use super::ProviderError;
+
+/// Captured once before checking holds; the request uses these exact bytes.
+/// Never derive Debug/Serialize: it contains a live access token.
+pub struct UsageCredentials {
+    pub(crate) access_token: String,
+    pub(crate) account_id: Option<String>,
+    pub(crate) note: Option<String>,
+    pub(crate) context: String,
+}
+
+impl UsageCredentials {
+    pub(crate) fn new(
+        provider: &str,
+        access_token: String,
+        account_id: Option<String>,
+        note: Option<String>,
+    ) -> Self {
+        // Conservatively invalidate on token rotation as well as account changes.
+        let mut digest = Sha256::new();
+        for part in [
+            "limitbar-usage-v1",
+            provider,
+            &access_token,
+            account_id.as_deref().unwrap_or(""),
+        ] {
+            digest.update(part.as_bytes());
+            digest.update([0]);
+        }
+        Self {
+            access_token,
+            account_id,
+            note,
+            context: format!("{:x}", digest.finalize()),
+        }
+    }
+}
+
+/// Short retries allow the owning CLI to finish replacing/truncating its file.
+/// No network, process launch, refresh token or credential write is involved.
+pub async fn read_replacing_file<T>(
+    mut read: impl FnMut() -> Result<T, ProviderError> + Send,
+) -> Result<T, ProviderError> {
+    for _ in 0..2 {
+        match read() {
+            Ok(value) => return Ok(value),
+            Err(
+                ProviderError::NotSignedIn
+                | ProviderError::NotInstalled
+                | ProviderError::Malformed(_)
+                | ProviderError::SessionExpired,
+            ) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    read()
+}
+
+pub fn jwt_claims(token: &str) -> Option<serde_json::Value> {
+    let payload = token.split('.').nth(1)?.trim_end_matches('=');
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice(&decoded).ok()
+}
+
+pub fn number(value: &serde_json::Value, key: &str) -> Option<f64> {
+    value.get(key)?.as_f64().filter(|n| n.is_finite())
+}
+
+pub fn non_empty(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+pub fn slug(value: &str) -> String {
+    value
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// A known credential file for an already discovered installation.
+pub fn read_json_file(path: &Path) -> Result<serde_json::Value, ProviderError> {
+    let bytes = std::fs::read(path).map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound => ProviderError::NotSignedIn,
+        _ => ProviderError::Malformed("Cannot read credentials".into()),
+    })?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| ProviderError::Malformed("Invalid credential JSON".into()))
+}
 
 /// The first of these variables that is set to something non-empty.
 ///
@@ -76,11 +175,7 @@ pub fn read_credentials<T: DeserializeOwned>(
 /// We are not authenticating anything here, just reading a hint, so skipping
 /// signature verification is safe: the server remains the authority.
 pub fn jwt_expiry(token: &str) -> Option<i64> {
-    let payload = token.split('.').nth(1)?;
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let claims = jwt_claims(token)?;
     claims.get("exp")?.as_i64()
 }
 
@@ -117,6 +212,12 @@ pub fn is_window_live(resets_at: Option<i64>) -> bool {
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use std::sync::{Mutex, MutexGuard};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
     struct Sample {
@@ -139,31 +240,26 @@ mod tests {
 
     #[test]
     fn env_override_beats_home() {
-        scoped_env("HOME", Some("/home/someone"), || {
-            scoped_env("LIMITBAR_TEST_HOME", Some("/elsewhere/cfg"), || {
-                assert_eq!(
-                    agent_home("LIMITBAR_TEST_HOME", ".claude"),
-                    Some(PathBuf::from("/elsewhere/cfg"))
-                );
-            });
-            scoped_env("LIMITBAR_TEST_HOME", None, || {
-                assert_eq!(
-                    agent_home("LIMITBAR_TEST_HOME", ".claude"),
-                    Some(PathBuf::from("/home/someone/.claude"))
-                );
-            });
-            // An empty override is treated as unset rather than as the root directory.
-            scoped_env("LIMITBAR_TEST_HOME", Some(""), || {
-                assert_eq!(
-                    agent_home("LIMITBAR_TEST_HOME", ".claude"),
-                    Some(PathBuf::from("/home/someone/.claude"))
-                );
-            });
+        let _guard = env_lock();
+        let expected = home_dir().map(|p| p.join(".claude"));
+        scoped_env("LIMITBAR_TEST_HOME", Some("/elsewhere/cfg"), || {
+            assert_eq!(
+                agent_home("LIMITBAR_TEST_HOME", ".claude"),
+                Some(PathBuf::from("/elsewhere/cfg"))
+            );
+        });
+        scoped_env("LIMITBAR_TEST_HOME", None, || {
+            assert_eq!(agent_home("LIMITBAR_TEST_HOME", ".claude"), expected);
+        });
+        // An empty override is treated as unset rather than as the root directory.
+        scoped_env("LIMITBAR_TEST_HOME", Some(""), || {
+            assert_eq!(agent_home("LIMITBAR_TEST_HOME", ".claude"), expected);
         });
     }
 
     #[test]
     fn an_exported_but_blank_variable_counts_as_unset() {
+        let _guard = env_lock();
         scoped_env("LIMITBAR_TEST_A", Some(""), || {
             scoped_env("LIMITBAR_TEST_B", Some("/second"), || {
                 assert_eq!(
@@ -176,6 +272,7 @@ mod tests {
 
     #[test]
     fn env_candidates_are_tried_in_order() {
+        let _guard = env_lock();
         scoped_env("LIMITBAR_TEST_A", Some("/first"), || {
             scoped_env("LIMITBAR_TEST_B", Some("/second"), || {
                 assert_eq!(
@@ -189,6 +286,7 @@ mod tests {
 
     #[test]
     fn the_home_directory_follows_the_platform() {
+        let _guard = env_lock();
         scoped_env("HOME", Some("/posix/home"), || {
             scoped_env("USERPROFILE", Some(r"C:\Users\someone"), || {
                 let expected = if cfg!(windows) {
@@ -283,5 +381,32 @@ mod tests {
         assert!(is_window_live(None));
         assert!(is_window_live(Some(now() + 600)));
         assert!(!is_window_live(Some(now() - 1)));
+    }
+
+    #[tokio::test]
+    async fn credential_publication_retries_are_local_and_bounded() {
+        let mut reads = 0;
+        let value = read_replacing_file(|| {
+            reads += 1;
+            if reads < 3 {
+                Err(ProviderError::Malformed("partial file".into()))
+            } else {
+                Ok("complete")
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(reads, 3);
+        assert_eq!(value, "complete");
+        let mut reads = 0;
+        assert!(matches!(
+            read_replacing_file::<()>(|| {
+                reads += 1;
+                Err(ProviderError::SessionExpired)
+            })
+            .await,
+            Err(ProviderError::SessionExpired)
+        ));
+        assert_eq!(reads, 3);
     }
 }
