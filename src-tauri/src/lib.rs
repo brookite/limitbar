@@ -7,6 +7,8 @@ use limitbar_core::settings::{self, Settings};
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
 
+mod window_state;
+
 struct AppState {
     monitor: Mutex<Monitor>,
 }
@@ -53,15 +55,37 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let saved = settings::load();
-            if saved.always_on_top {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.set_always_on_top(true);
+            let tracker = window_state::Tracker::default();
+            if let Some(webview) = app.get_webview_window("main") {
+                let window = webview.as_ref().window();
+                if let Err(error) = window_state::restore(&window) {
+                    eprintln!("limitbar: could not restore window state: {error}");
+                    let _ = window.center();
                 }
+                tracker.remember(&window);
+                let _ = window.set_always_on_top(saved.always_on_top);
+                window.show()?;
             }
+            app.manage(tracker);
             app.manage(AppState {
                 monitor: Mutex::new(Monitor::new(limitbar_core::default_providers())),
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            let Some(tracker) = window.try_state::<window_state::Tracker>() else {
+                return;
+            };
+            match event {
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    tracker.remember(window)
+                }
+                tauri::WindowEvent::CloseRequested { .. } => tracker.save(window),
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             fetch_limits,

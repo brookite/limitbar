@@ -185,11 +185,34 @@ body {
   border-top: 1px solid var(--sep);
 }
 
+.agent__heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent__drag {
+  flex: none;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-faint);
+  font: inherit;
+  cursor: grab;
+  touch-action: none;
+}
+
+.agent__drag:hover { color: var(--fg); }
+.agent__drag:focus-visible { outline: 1px solid var(--accent); }
+.agent.is-dragging { background: var(--bg-raised); outline: 1px solid var(--accent); outline-offset: -1px; }
+.agent.is-dragging .agent__drag { cursor: grabbing; }
+
 .agent__head {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 0;
   border: 0;
   background: transparent;

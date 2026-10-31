@@ -9,7 +9,7 @@
 import type { AgentSnapshot, Gauge, UsageDetail } from "../model";
 import { healthOf } from "../model";
 import { createGauge, type GaugeView } from "./gauge";
-import { detailLabel, detailValue, formatDuration, statusMessage, ui } from "./strings";
+import { formatDuration, statusMessage, ui } from "./strings";
 
 export interface SectionView {
   readonly root: HTMLElement;
@@ -23,6 +23,16 @@ export function createSection(agent: AgentSnapshot, options: {
 }): SectionView {
   const root = document.createElement("section");
   root.className = "agent";
+  root.dataset.agentId = agent.id;
+
+  const heading = document.createElement("div");
+  heading.className = "agent__heading";
+  const drag = document.createElement("button");
+  drag.type = "button";
+  drag.className = "agent__drag";
+  drag.textContent = "⠿";
+  drag.title = ui.reorderAgent(agent.displayName);
+  drag.setAttribute("aria-label", drag.title);
 
   const head = document.createElement("button");
   head.type = "button";
@@ -76,7 +86,8 @@ export function createSection(agent: AgentSnapshot, options: {
   extras.append(summary, details);
   let detailRows: { entry: UsageDetail; row: HTMLElement; expiry: HTMLElement }[] = [];
   content.append(bars, extras, message);
-  root.append(head, content);
+  heading.append(drag, head);
+  root.append(heading, content);
 
   const gauges = new Map<string, GaugeView>();
 
@@ -97,10 +108,10 @@ export function createSection(agent: AgentSnapshot, options: {
         const row = document.createElement("div");
         row.className = "agent__detail";
         const label = document.createElement("dt");
-        label.textContent = detailLabel(entry.label);
+        label.textContent = entry.label;
         label.title = label.textContent;
         const value = document.createElement("dd");
-        value.textContent = detailValue(entry.value);
+        value.textContent = entry.value;
         const expiry = document.createElement("dd");
         expiry.className = "agent__detail-expiry";
         row.append(label, value, expiry);

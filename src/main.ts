@@ -18,13 +18,14 @@ import type { AgentSnapshot, Settings, Snapshot } from "./model";
 import { createSection, type SectionView } from "./ui/agent-section";
 import { createIntervalPicker, MANUAL } from "./ui/interval-picker";
 import { createTitlebar } from "./ui/titlebar";
+import { enableSectionOrdering } from "./ui/section-order";
 import { formatDuration, ui } from "./ui/strings";
 import "./style.css";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("#app is missing from index.html");
 
-let settings: Settings = { intervalSecs: 45, alwaysOnTop: false, collapsedAgents: [] };
+let settings: Settings = { intervalSecs: 45, alwaysOnTop: false, collapsedAgents: [], agentOrder: [] };
 let settingsWrites: Promise<void> = Promise.resolve();
 let pollTimer: number | undefined;
 let inFlight = false;
@@ -34,6 +35,10 @@ const sections = new Map<string, SectionView>();
 
 const body = document.createElement("main");
 body.className = "sections";
+const ordering = enableSectionOrdering(body, (ids) => {
+  const absent = settings.agentOrder.filter(id => !ids.includes(id));
+  void persist({ ...settings, agentOrder: [...ids, ...absent] });
+});
 
 const empty = document.createElement("p");
 empty.className = "empty";
@@ -151,7 +156,14 @@ function render(snapshot: Snapshot): void {
   const now = Math.floor(Date.now() / 1000);
   const seen = new Set<string>();
 
-  for (const agent of snapshot.agents) {
+  const ordered = [...snapshot.agents].sort((a, b) => {
+    const rank = (id: string) => {
+      const index = settings.agentOrder.indexOf(id);
+      return index < 0 ? settings.agentOrder.length : index;
+    };
+    return rank(a.id) - rank(b.id);
+  });
+  for (const agent of ordered) {
     seen.add(agent.id);
     upsert(agent, now);
   }
@@ -160,6 +172,15 @@ function render(snapshot: Snapshot): void {
     if (!seen.has(id)) {
       section.root.remove();
       sections.delete(id);
+    }
+  }
+
+  if (!ordering.isDragging()) {
+    for (const [index, agent] of ordered.entries()) {
+      const root = sections.get(agent.id)!.root;
+      if (body.children[index] !== root) {
+        body.insertBefore(root, body.children[index] ?? null);
+      }
     }
   }
 
@@ -184,7 +205,6 @@ function upsert(agent: AgentSnapshot, now: number): void {
   const existing = sections.get(agent.id);
   if (existing) {
     existing.update(agent, now);
-    body.append(existing.root);
     return;
   }
   const created = createSection(agent, {

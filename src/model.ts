@@ -59,6 +59,7 @@ export interface Settings {
   intervalSecs: number;
   alwaysOnTop: boolean;
   collapsedAgents: string[];
+  agentOrder: string[];
 }
 
 /** The dot next to a section heading. */
