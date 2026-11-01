@@ -4,7 +4,9 @@
 use limitbar_core::model::{Snapshot, INTERVAL_CHOICES};
 use limitbar_core::providers::Monitor;
 use limitbar_core::settings::{self, Settings};
-use tauri::{Manager, State};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 mod window_state;
@@ -52,7 +54,82 @@ fn minimize_window(window: tauri::Window) -> Result<(), String> {
 
 #[tauri::command]
 fn close_window(window: tauri::Window) -> Result<(), String> {
-    window.close().map_err(|err| err.to_string())
+    if let Some(tracker) = window.try_state::<window_state::Tracker>() {
+        tracker.save(&window);
+    }
+    window.hide().map_err(|err| err.to_string())
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(webview) = app.get_webview_window("main") {
+        let window = webview.as_ref().window();
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn hide_main_window(app: &AppHandle) {
+    if let Some(webview) = app.get_webview_window("main") {
+        let window = webview.as_ref().window();
+        if let Some(tracker) = app.try_state::<window_state::Tracker>() {
+            tracker.save(&window);
+        }
+        let _ = window.hide();
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open_item = MenuItem::with_id(app, "open", "Open LimitBar", true, None::<&str>)?;
+    let hide_item = MenuItem::with_id(app, "hide", "Hide LimitBar", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open_item, &hide_item, &separator, &quit_item])?;
+
+    let mut builder = TrayIconBuilder::with_id("main-tray")
+        .tooltip("LimitBar")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main_window(app),
+            "hide" => hide_main_window(app),
+            "quit" => {
+                if let Some(webview) = app.get_webview_window("main") {
+                    let window = webview.as_ref().window();
+                    if let Some(tracker) = app.try_state::<window_state::Tracker>() {
+                        tracker.save(&window);
+                    }
+                }
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(webview) = app.get_webview_window("main") {
+                    let window = webview.as_ref().window();
+                    let visible = window.is_visible().unwrap_or(false)
+                        && !window.is_minimized().unwrap_or(false);
+                    if visible {
+                        hide_main_window(app);
+                    } else {
+                        show_main_window(app);
+                    }
+                }
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+
+    builder.build(app)?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -81,6 +158,9 @@ pub fn run() {
                 let _ = window.set_always_on_top(saved.always_on_top);
                 window.show()?;
             }
+            if let Err(error) = setup_tray(app) {
+                eprintln!("limitbar: could not create tray icon: {error}");
+            }
             app.manage(tracker);
             app.manage(AppState {
                 monitor: Mutex::new(Monitor::new(limitbar_core::default_providers())),
@@ -98,7 +178,11 @@ pub fn run() {
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                     tracker.remember(window)
                 }
-                tauri::WindowEvent::CloseRequested { .. } => tracker.save(window),
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    tracker.save(window);
+                    let _ = window.hide();
+                }
                 _ => {}
             }
         })
