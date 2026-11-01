@@ -426,16 +426,13 @@ fn load_desktop_credentials() -> Result<UsageCredentials, ProviderError> {
 }
 
 fn load_credentials() -> Result<UsageCredentials, ProviderError> {
-    match load_cli_credentials() {
+    match load_desktop_credentials() {
         Ok(creds) => Ok(creds),
-        Err(cli_err @ (ProviderError::NotSignedIn | ProviderError::SessionExpired)) => {
-            match load_desktop_credentials() {
-                Ok(creds) => Ok(creds),
-                Err(ProviderError::NotSignedIn) => Err(cli_err),
-                Err(desktop_err) => Err(desktop_err),
-            }
-        }
-        Err(err) => Err(err),
+        Err(desktop_err) => match load_cli_credentials() {
+            Ok(creds) => Ok(creds),
+            Err(ProviderError::NotSignedIn) => Err(desktop_err),
+            Err(cli_err) => Err(cli_err),
+        },
     }
 }
 
@@ -535,33 +532,7 @@ impl LimitProvider for ClaudeProvider {
         credentials: Option<UsageCredentials>,
     ) -> Result<AgentReading, ProviderError> {
         let credentials = credentials.ok_or(ProviderError::NotSignedIn)?;
-        match fetch_usage(
-            http,
-            base,
-            &credentials.access_token,
-            credentials.note.clone(),
-        )
-        .await
-        {
-            Ok(reading) => Ok(reading),
-            Err(
-                primary_err @ (ProviderError::RateLimited { .. }
-                | ProviderError::Unauthorized
-                | ProviderError::SessionExpired),
-            ) => {
-                if let Ok(desktop) = load_desktop_credentials() {
-                    if desktop.access_token != credentials.access_token {
-                        if let Ok(reading) =
-                            fetch_usage(http, base, &desktop.access_token, desktop.note).await
-                        {
-                            return Ok(reading);
-                        }
-                    }
-                }
-                Err(primary_err)
-            }
-            Err(err) => Err(err),
-        }
+        fetch_usage(http, base, &credentials.access_token, credentials.note).await
     }
     async fn fetch(
         &self,
