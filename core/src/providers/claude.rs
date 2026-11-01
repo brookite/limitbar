@@ -30,6 +30,21 @@ pub struct ClaudeProvider;
 #[serde(transparent)]
 struct UsageResponse(Value);
 
+fn subscription_note(oauth: &Value) -> Option<String> {
+    let mut note = non_empty(oauth, "subscriptionType");
+    if note.as_deref() == Some("max") {
+        if let Some(tier) = non_empty(oauth, "rateLimitTier") {
+            if let Some(multiplier) = tier
+                .split('_')
+                .find(|p| p.ends_with('x') && p.trim_end_matches('x').parse::<u32>().is_ok())
+            {
+                note = Some(format!("max {multiplier}"));
+            }
+        }
+    }
+    note
+}
+
 fn load_credentials() -> Result<UsageCredentials, ProviderError> {
     let home = agent_home("CLAUDE_CONFIG_DIR", ".claude").ok_or(ProviderError::NotSignedIn)?;
     let stored = read_json_file(&home.join(".credentials.json"))?;
@@ -44,18 +59,12 @@ fn load_credentials() -> Result<UsageCredentials, ProviderError> {
             return Err(ProviderError::MissingScope);
         }
     }
-    let mut note = non_empty(oauth, "subscriptionType");
-    if note.as_deref() == Some("max") {
-        if let Some(tier) = non_empty(oauth, "rateLimitTier") {
-            if let Some(multiplier) = tier
-                .split('_')
-                .find(|p| p.ends_with('x') && p.trim_end_matches('x').parse::<u32>().is_ok())
-            {
-                note = Some(format!("max {multiplier}"));
-            }
-        }
-    }
-    Ok(UsageCredentials::new("claude", token, None, note))
+    Ok(UsageCredentials::new(
+        "claude",
+        token,
+        None,
+        subscription_note(oauth),
+    ))
 }
 
 fn usage_window(value: &Value, id: &str, label: &str) -> Option<Gauge> {

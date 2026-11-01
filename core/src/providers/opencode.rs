@@ -73,6 +73,7 @@ pub fn parse_usage(body: &Value, at: i64) -> Vec<Gauge> {
         let window = &body["usage"][key];
         let Some(used) = window["usagePercent"]
             .as_f64()
+            .or_else(|| window["percent"].as_f64())
             .filter(|v| v.is_finite() && *v >= 0.0)
         else {
             continue;
@@ -189,7 +190,7 @@ mod tests {
     #[test]
     fn api_percent_is_not_a_fraction_and_optional_windows_stay_absent() {
         let gauges = parse_usage(
-            &json!({"usage":{"rolling":{"usagePercent":0.5,"resetInSec":60},"weekly":{"usagePercent":100}}}),
+            &json!({"usage":{"rolling":{"usagePercent":0.5,"resetInSec":60},"weekly":{"percent":100}}}),
             1000,
         );
         assert_eq!(gauges.len(), 2);

@@ -7,6 +7,7 @@
  * immediate fetch when it comes back.
  */
 
+import { listen } from "@tauri-apps/api/event";
 import {
   fetchLimits,
   intervalChoices,
@@ -86,6 +87,10 @@ async function start(): Promise<void> {
 
   document.addEventListener("visibilitychange", onVisibilityChange);
   window.setInterval(tick, 1000);
+  void listen<Snapshot>("limits-updated", (event) => {
+    lastFetchedAt = event.payload.fetchedAt;
+    render(event.payload);
+  });
 
   // Manual means manual, including at launch: starting the widget must not be a
   // way to send a request you did not ask for. The footer says so until you do.

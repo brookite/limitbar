@@ -3,7 +3,7 @@
  * refresh picker, a pin toggle and a close button.
  */
 
-import { closeWindow, setAlwaysOnTop } from "../api";
+import { closeWindow, minimizeWindow, setAlwaysOnTop } from "../api";
 import { ui } from "./strings";
 
 export interface TitlebarOptions {
@@ -49,10 +49,13 @@ export function createTitlebar(options: TitlebarOptions): TitlebarView {
     options.onPinChange(pinned);
   });
 
+  const minimize = iconButton("minimize", ui.minimize, minimizeIcon());
+  minimize.addEventListener("click", () => void minimizeWindow());
+
   const close = iconButton("close", ui.close, closeIcon());
   close.addEventListener("click", () => void closeWindow());
 
-  controls.append(refresh, pin, close);
+  controls.append(refresh, pin, minimize, close);
   root.append(title, controls);
 
   return {
@@ -101,5 +104,7 @@ const refreshIcon = () =>
 
 // A pushpin: head, shaft, point.
 const pinIcon = () => svg(["M9.8 1.8 14.2 6.2", "M11 3 8.2 5.2 4 6.4l5.6 5.6 1.2-4.2L13 5.2", "M6.6 9.4 2.5 13.5"]);
+
+const minimizeIcon = () => svg(["M3.5 8.5h9"]);
 
 const closeIcon = () => svg(["M3.5 3.5 12.5 12.5", "M12.5 3.5 3.5 12.5"]);

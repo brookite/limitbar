@@ -490,10 +490,8 @@ fn reconcile(
         let wait = match &error {
             ProviderError::RateLimited {
                 retry_after: Some(secs),
-            } => *secs,
-            ProviderError::RateLimited { retry_after: None } if id == "claude" => {
-                state.backoff.penalty().max(300)
-            }
+            } if *secs > 0 => *secs,
+            ProviderError::RateLimited { .. } if id == "claude" => state.backoff.penalty().max(300),
             _ => state.backoff.penalty(),
         };
         state.hold_until = now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX));

@@ -15,4 +15,6 @@ export const intervalChoices = (): Promise<number[]> => invoke<number[]>("interv
 export const setAlwaysOnTop = (pinned: boolean): Promise<void> =>
   invoke("set_always_on_top", { pinned });
 
+export const minimizeWindow = (): Promise<void> => invoke("minimize_window");
+
 export const closeWindow = (): Promise<void> => invoke("close_window");
