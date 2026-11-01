@@ -11,6 +11,7 @@ import type { AgentStatus } from "../model";
 export const ui = {
   pinOn: "Unpin window",
   pinOff: "Keep window on top",
+  minimize: "Minimize",
   close: "Close",
   refreshNow: "Refresh now",
   intervalLabel: "Refresh interval",

@@ -46,18 +46,33 @@ fn set_always_on_top(window: tauri::Window, pinned: bool) -> Result<(), String> 
 }
 
 #[tauri::command]
+fn minimize_window(window: tauri::Window) -> Result<(), String> {
+    window.minimize().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn close_window(window: tauri::Window) -> Result<(), String> {
     window.close().map_err(|err| err.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("GDK_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
+        // Wayland compositors ignore client-initiated `set_always_on_top` and `set_position`.
+        // Running the widget via XWayland enables both pinning and geometry restoration.
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             let saved = settings::load();
             let tracker = window_state::Tracker::default();
             if let Some(webview) = app.get_webview_window("main") {
                 let window = webview.as_ref().window();
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    let _ = window.set_icon(icon);
+                }
                 if let Err(error) = window_state::restore(&window) {
                     eprintln!("limitbar: could not restore window state: {error}");
                     let _ = window.center();
@@ -93,6 +108,7 @@ pub fn run() {
             save_settings,
             interval_choices,
             set_always_on_top,
+            minimize_window,
             close_window,
         ])
         .run(tauri::generate_context!())
