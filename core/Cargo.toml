@@ -17,11 +17,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 thiserror = "2"
 log = "0.4"
 sha2 = "0.10"
-ring = "0.17"
 rusqlite = { version = "0.37", features = ["bundled"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-dbus = "0.9"
 
 [dev-dependencies]
 wiremock = "0.6"
