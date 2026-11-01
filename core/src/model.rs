@@ -59,7 +59,11 @@ impl AgentSnapshot {
 /// Why a section looks the way it does. The Rust side never formats prose: it
 /// reports a structured reason plus the values the UI needs to fill in a sentence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AgentStatus {
     /// Fresh numbers.
     Ok,
@@ -265,5 +269,16 @@ mod tests {
         assert!(AgentStatus::RateLimited { retry_at: 0 }.keeps_previous_gauges());
         assert!(!AgentStatus::NotSignedIn.keeps_previous_gauges());
         assert!(!AgentStatus::SessionExpired.keeps_previous_gauges());
+    }
+
+    #[test]
+    fn status_fields_serialize_as_camel_case_for_the_ui() {
+        let json = serde_json::to_value(AgentStatus::Stale {
+            last_ok_at: 100,
+            because: Box::new(AgentStatus::RateLimited { retry_at: 200 }),
+        })
+        .unwrap();
+        assert_eq!(json["lastOkAt"], 100);
+        assert_eq!(json["because"]["retryAt"], 200);
     }
 }

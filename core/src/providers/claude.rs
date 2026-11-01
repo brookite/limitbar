@@ -535,7 +535,33 @@ impl LimitProvider for ClaudeProvider {
         credentials: Option<UsageCredentials>,
     ) -> Result<AgentReading, ProviderError> {
         let credentials = credentials.ok_or(ProviderError::NotSignedIn)?;
-        fetch_usage(http, base, &credentials.access_token, credentials.note).await
+        match fetch_usage(
+            http,
+            base,
+            &credentials.access_token,
+            credentials.note.clone(),
+        )
+        .await
+        {
+            Ok(reading) => Ok(reading),
+            Err(
+                primary_err @ (ProviderError::RateLimited { .. }
+                | ProviderError::Unauthorized
+                | ProviderError::SessionExpired),
+            ) => {
+                if let Ok(desktop) = load_desktop_credentials() {
+                    if desktop.access_token != credentials.access_token {
+                        if let Ok(reading) =
+                            fetch_usage(http, base, &desktop.access_token, desktop.note).await
+                        {
+                            return Ok(reading);
+                        }
+                    }
+                }
+                Err(primary_err)
+            }
+            Err(err) => Err(err),
+        }
     }
     async fn fetch(
         &self,
