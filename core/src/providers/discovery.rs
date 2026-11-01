@@ -71,12 +71,12 @@ fn command_in(dirs: &[PathBuf], names: &[&str]) -> bool {
 
 pub fn installed(id: &str) -> bool {
     let names: &[&str] = match id {
-        "claude" => &["claude"],
+        "claude" => &["claude", "claude-desktop"],
         "codex" => &["codex"],
         "cursor" => &["cursor", "cursor-agent"],
         "gemini" => &["gemini"],
         "antigravity" => &["antigravity", "agy"],
-        "opencode" => &["opencode"],
+        "opencode" => &["opencode", "opencode-desktop", "ai.opencode"],
         _ => return false,
     };
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
@@ -99,7 +99,11 @@ pub fn installed(id: &str) -> bool {
         }
         if let Some(local) = first_non_empty_env(&["LOCALAPPDATA"]) {
             dirs.push(local.join("cursor-agent"));
+            if id == "claude" && executable(&local.join("AnthropicClaude/claude.exe")) {
+                return true;
+            }
             let app = match id {
+                "claude" => Some("Claude/Claude.exe"),
                 "cursor" => Some("cursor/Cursor.exe"),
                 "antigravity" => Some("Antigravity/Antigravity.exe"),
                 "opencode" => Some("OpenCode/OpenCode.exe"),
@@ -112,6 +116,7 @@ pub fn installed(id: &str) -> bool {
         for root in ["ProgramFiles", "ProgramFiles(x86)"] {
             if let Some(root) = first_non_empty_env(&[root]) {
                 let app = match id {
+                    "claude" => Some("Claude/Claude.exe"),
                     "cursor" => Some("Cursor/Cursor.exe"),
                     "antigravity" => Some("Antigravity/Antigravity.exe"),
                     "opencode" => Some("OpenCode/OpenCode.exe"),
@@ -124,6 +129,7 @@ pub fn installed(id: &str) -> bool {
         }
     } else if cfg!(target_os = "macos") {
         let app = match id {
+            "claude" => Some("Claude"),
             "cursor" => Some("Cursor"),
             "antigravity" => Some("Antigravity"),
             "opencode" => Some("OpenCode"),
@@ -139,8 +145,16 @@ pub fn installed(id: &str) -> bool {
         }
     } else {
         dirs.extend([PathBuf::from("/usr/bin"), PathBuf::from("/usr/local/bin")]);
+        if id == "claude" {
+            dirs.push(PathBuf::from("/usr/lib/claude-desktop"));
+            dirs.push(PathBuf::from("/opt/Claude"));
+        }
         if id == "cursor" {
             dirs.push(PathBuf::from("/opt/cursor"));
+            dirs.push(PathBuf::from("/usr/share/cursor"));
+        }
+        if id == "opencode" {
+            dirs.push(PathBuf::from("/opt/OpenCode"));
         }
         if id == "antigravity" {
             dirs.push(PathBuf::from("/usr/share/antigravity/bin"));
