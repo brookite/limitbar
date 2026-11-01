@@ -147,25 +147,111 @@ body {
 
 /* ---- interval picker ---------------------------------------------------- */
 
-.interval__select {
-  height: 20px;
-  padding: 0 2px;
+.interval {
+  position: relative;
+  margin-right: 2px;
+}
+
+.interval__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 7px;
   border: 1px solid var(--sep);
-  border-radius: 4px;
+  border-radius: 5px;
   background: var(--bg);
   color: var(--fg-muted);
   font: inherit;
-  font-size: 10px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
 
-.interval__select:hover {
+.interval__trigger:hover,
+.interval.is-open .interval__trigger {
+  color: var(--fg);
+  background: var(--track);
+  border-color: var(--fg-faint);
+}
+
+.interval__trigger:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.interval__chevron {
+  flex: none;
+  color: var(--fg-faint);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.interval__trigger:hover .interval__chevron,
+.interval.is-open .interval__chevron {
   color: var(--fg);
 }
 
-.interval__select:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
+.interval.is-open .interval__chevron {
+  transform: rotate(180deg);
+}
+
+.interval__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 76px;
+  padding: 4px;
+  border: 1px solid var(--sep);
+  border-radius: 7px;
+  background: var(--bg-raised);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.42), 0 2px 6px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.interval__menu[hidden] {
+  display: none;
+}
+
+.interval__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+}
+
+.interval__option:hover,
+.interval__option:focus-visible {
+  background: var(--track);
+  color: var(--fg);
+  outline: none;
+}
+
+.interval__option.is-selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.interval__option.is-selected::after {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 6px;
 }
 
 /* ---- sections ----------------------------------------------------------- */
